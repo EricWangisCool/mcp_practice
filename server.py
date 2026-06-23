@@ -234,6 +234,16 @@ def get_greeting(name: str) -> str:
     logger.info(f"Resource requested: greeting for {name}")
     return f"Hello, {name}! Welcome to the Model Context Protocol (MCP) server."
 
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request):
+    """
+    Health check endpoint for ALB/ECS Target Group.
+    """
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "healthy", "service": "mcp-practice-server"})
+
+
 if __name__ == "__main__":
     import os
     # Check if we should run in SSE mode (standard for ECS/Web deployments)
