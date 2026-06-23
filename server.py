@@ -118,6 +118,111 @@ def aws_s3_ls(path: str = "") -> str:
         return f"An unexpected error occurred: {str(e)}"
 
 
+
+@mcp.tool()
+def aws_cw_logs_list_groups(prefix: str = "", limit: int = 20) -> str:
+    """
+    List CloudWatch Log Groups.
+    
+    Args:
+        prefix: Optional prefix to filter log groups by name.
+        limit: Maximum number of log groups to return (default 20, max 50).
+    """
+    import boto3
+    import time
+    from botocore.exceptions import BotoCoreError, ClientError
+    
+    logger.info(f"Tool called: aws_cw_logs_list_groups(prefix='{prefix}', limit={limit})")
+    try:
+        logs = boto3.client('logs')
+        params = {"limit": min(limit, 50)}
+        if prefix:
+            params["logGroupNamePrefix"] = prefix
+            
+        response = logs.describe_log_groups(**params)
+        groups = response.get("logGroups", [])
+        
+        if not groups:
+            return "No log groups found."
+            
+        lines = []
+        for g in groups:
+            creation_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(g.get("creationTime", 0) / 1000.0))
+            lines.append(f"{creation_time} | {g['logGroupName']}")
+        return "\n".join(lines)
+    except (BotoCoreError, ClientError) as e:
+        logger.error(f"AWS Error in list_groups: {str(e)}")
+        return f"Error connecting to AWS CloudWatch Logs: {str(e)}"
+    except Exception as e:
+        logger.error(f"Unexpected Error in list_groups: {str(e)}")
+        return f"An unexpected error occurred: {str(e)}"
+
+
+@mcp.tool()
+def aws_cw_logs_get_events(log_group: str, log_stream: str = "", limit: int = 50) -> str:
+    """
+    Retrieve log events from a CloudWatch Log Group.
+    If no log_stream is specified, it will automatically fetch events from the most recently active log stream in that group.
+    
+    Args:
+        log_group: The name of the log group.
+        log_stream: Optional log stream name. If omitted, the latest stream is used.
+        limit: Number of events to return (default 50, max 100).
+    """
+    import boto3
+    import time
+    from botocore.exceptions import BotoCoreError, ClientError
+    
+    logger.info(f"Tool called: aws_cw_logs_get_events(log_group='{log_group}', log_stream='{log_stream}', limit={limit})")
+    try:
+        logs = boto3.client('logs')
+        
+        target_stream = log_stream
+        if not target_stream:
+            # Find the most recently active log stream
+            response = logs.describe_log_streams(
+                logGroupName=log_group,
+                orderBy="LastEventTime",
+                descending=True,
+                limit=1
+            )
+            streams = response.get("logStreams", [])
+            if not streams:
+                return f"No log streams found in log group '{log_group}'."
+            target_stream = streams[0]["logStreamName"]
+            logger.info(f"Automatically selected latest log stream: {target_stream}")
+            
+        # Get log events
+        response = logs.get_log_events(
+            logGroupName=log_group,
+            logStreamName=target_stream,
+            limit=min(limit, 100),
+            startFromHead=False  # Get latest logs from the tail
+        )
+        events = response.get("events", [])
+        if not events:
+            return f"No events found in log stream '{target_stream}' of group '{log_group}'."
+            
+        lines = []
+        if not log_stream:
+            lines.append(f"--- Showing logs from automatically selected latest stream: {target_stream} ---")
+        else:
+            lines.append(f"--- Showing logs from stream: {target_stream} ---")
+            
+        for event in events:
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(event['timestamp'] / 1000.0))
+            message = event['message'].rstrip('\r\n')
+            lines.append(f"[{timestamp}] {message}")
+            
+        return "\n".join(lines)
+    except (BotoCoreError, ClientError) as e:
+        logger.error(f"AWS Error in get_events: {str(e)}")
+        return f"Error retrieving logs from AWS CloudWatch: {str(e)}"
+    except Exception as e:
+        logger.error(f"Unexpected Error in get_events: {str(e)}")
+        return f"An unexpected error occurred: {str(e)}"
+
+
 @mcp.resource("greeting://{name}")
 def get_greeting(name: str) -> str:
     """
@@ -130,5 +235,14 @@ def get_greeting(name: str) -> str:
     return f"Hello, {name}! Welcome to the Model Context Protocol (MCP) server."
 
 if __name__ == "__main__":
-    # Start the server (runs via stdio transport by default)
-    mcp.run()
+    import os
+    # Check if we should run in SSE mode (standard for ECS/Web deployments)
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    
+    if transport == "sse":
+        port = int(os.environ.get("PORT", 8000))
+        logger.info(f"Starting FastMCP server via SSE on port {port}")
+        mcp.run(transport="sse", port=port)
+    else:
+        logger.info("Starting FastMCP server via stdio")
+        mcp.run(transport="stdio")

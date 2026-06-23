@@ -2,12 +2,16 @@
 FROM python:3.11-slim
 
 # Set environment variables
-# PYTHONUNBUFFERED=1 ensures that standard output/error streams are sent straight to terminal/client without buffering
-# PYTHONDONTWRITEBYTECODE=1 prevents Python from writing .pyc files
+# - PYTHONUNBUFFERED=1 ensures logs/responses are sent immediately
+# - PYTHONDONTWRITEBYTECODE=1 prevents python from writing .pyc files
+# - MCP_TRANSPORT=sse configures server.py to default to SSE mode on ECS
+# - PORT=8000 is the port the container will listen on
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    MCP_TRANSPORT=sse \
+    PORT=8000
 
-# Set the working directory in the container
+# Set the working directory inside the container
 WORKDIR /app
 
 # Copy the requirements file first to leverage Docker cache
@@ -19,5 +23,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the server application code
 COPY server.py .
 
-# Run the MCP server via standard input/output (stdio)
+# Expose the port that the application listens on
+EXPOSE 8000
+
+# Run the MCP server
 ENTRYPOINT ["python", "server.py"]
