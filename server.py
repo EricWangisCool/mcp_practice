@@ -11,8 +11,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mcp-practice-server")
 
+import os
+
 # Initialize the FastMCP server
-mcp = FastMCP("mcp-practice-server")
+# Listen on 0.0.0.0 for containerized deployment (e.g. AWS ECS)
+mcp = FastMCP(
+    "mcp-practice-server",
+    host=os.environ.get("FASTMCP_HOST", "0.0.0.0"),
+    port=int(os.environ.get("PORT", 8000))
+)
 
 @mcp.tool()
 def add(a: float, b: float) -> float:
@@ -250,9 +257,8 @@ if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
     
     if transport == "sse":
-        port = int(os.environ.get("PORT", 8000))
-        logger.info(f"Starting FastMCP server via SSE on port {port}")
-        mcp.run(transport="sse", port=port)
+        logger.info(f"Starting FastMCP server via SSE (listening on {mcp.settings.host}:{mcp.settings.port})")
+        mcp.run(transport="sse")
     else:
         logger.info("Starting FastMCP server via stdio")
         mcp.run(transport="stdio")
