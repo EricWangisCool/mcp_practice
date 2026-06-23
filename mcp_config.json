@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mcp-practice-server": {
+      "command": "C:/Users/TMP-214/Desktop/課程 25548445232/AWS_李秉鴻老師/mcp_practice/.venv/Scripts/python.exe",
+      "args": [
+        "-u",
+        "C:/Users/TMP-214/Desktop/課程 25548445232/AWS_李秉鴻老師/mcp_practice/server.py"
+      ],
+      "env": {}
+    }
+  }
+}
