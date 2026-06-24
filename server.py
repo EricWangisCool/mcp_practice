@@ -407,6 +407,67 @@ class RequestLoggerMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class SSEHeartbeatMiddleware:
+    """
+    ASGI middleware to send keep-alive heartbeats (: comments)
+    every 10 seconds on the SSE GET connection.
+    """
+    def __init__(self, app, path="/sse", interval=10):
+        self.app = app
+        self.path = path
+        self.interval = interval
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == self.path:
+            import asyncio
+            send_lock = asyncio.Lock()
+            active = True
+            response_started = False
+
+            async def locked_send(message):
+                async with send_lock:
+                    await send(message)
+
+            async def heartbeat_sender():
+                while active:
+                    await asyncio.sleep(self.interval)
+                    if not active:
+                        break
+                    if not response_started:
+                        continue
+                    try:
+                        logger.info("Sending SSE keep-alive heartbeat comment (:\\n\\n)")
+                        await locked_send({
+                            "type": "http.response.body",
+                            "body": b":\n\n",
+                            "more_body": True
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to send SSE heartbeat: {e}")
+                        break
+
+            async def wrapped_send(message):
+                nonlocal active, response_started
+                if message["type"] == "http.response.start":
+                    response_started = True
+                elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                    active = False
+                await locked_send(message)
+
+            heartbeat_task = asyncio.create_task(heartbeat_sender())
+            try:
+                await self.app(scope, receive, wrapped_send)
+            finally:
+                active = False
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+        else:
+            await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
     import os
     # Check if we should run in SSE mode (standard for ECS/Web deployments)
@@ -416,7 +477,16 @@ if __name__ == "__main__":
         logger.info(f"Starting FastMCP server via SSE (listening on {mcp.settings.host}:{mcp.settings.port})")
         app = mcp.streamable_http_app()
         app.add_middleware(RequestLoggerMiddleware)
-        uvicorn.run(app, host=mcp.settings.host, port=mcp.settings.port)
+        
+        # Wrap with SSEHeartbeatMiddleware to keep the connection alive
+        heartbeat_app = SSEHeartbeatMiddleware(
+            app,
+            path=mcp.settings.streamable_http_path,
+            interval=10
+        )
+        
+        uvicorn.run(heartbeat_app, host=mcp.settings.host, port=mcp.settings.port)
     else:
         logger.info("Starting FastMCP server via stdio")
         mcp.run(transport="stdio")
+
