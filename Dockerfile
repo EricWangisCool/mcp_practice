@@ -20,8 +20,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the server application code
+# Copy the server application code and AWS Config data
 COPY server.py .
+COPY all_aws_config_exports.json .
 
 # Expose the port that the application listens on
 EXPOSE 8000
