@@ -2,6 +2,10 @@ import logging
 import sys
 # pyrefly: ignore [missing-import]
 from mcp.server.fastmcp import FastMCP
+import os
+import json
+import uvicorn
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Configure logging to sys.stderr so it doesn't corrupt stdout (which is used for MCP JSON-RPC protocol)
 logging.basicConfig(
@@ -11,14 +15,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mcp-practice-server")
 
-import os
-
 # Initialize the FastMCP server
 # Listen on 0.0.0.0 for containerized deployment (e.g. AWS ECS)
 mcp = FastMCP(
     "mcp-practice-server",
     host=os.environ.get("FASTMCP_HOST", "0.0.0.0"),
-    port=int(os.environ.get("PORT", 8000))
+    port=int(os.environ.get("PORT", 8000)),
+    streamable_http_path="/sse"
 )
 
 @mcp.tool()
@@ -251,6 +254,159 @@ async def health_check(request):
     return JSONResponse({"status": "healthy", "service": "mcp-practice-server"})
 
 
+def load_aws_config():
+    """
+    載入並解析 all_aws_config_exports.json。
+    由於 Results 中的每個元素通常是 JSON 字串，此函式會自動將其還原為 Python dict/list。
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "all_aws_config_exports.json")
+    
+    if not os.path.exists(file_path):
+        return []
+        
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        raw_results = data.get("Results", [])
+        parsed_results = []
+        
+        for item in raw_results:
+            if isinstance(item, str):
+                try:
+                    parsed_results.append(json.loads(item))
+                except json.JSONDecodeError:
+                    parsed_results.append({"raw_content": item})
+            else:
+                parsed_results.append(item)
+                
+        return parsed_results
+    except Exception as e:
+        logger.error(f"Error loading AWS Config file: {e}")
+        return []
+
+
+@mcp.tool(name="summary", description="回傳整個 all_aws_config_exports.json 的所有資源清單")
+def summary() -> list:
+    return load_aws_config()
+
+
+@mcp.tool(name="list-iam", description="回傳所有與 IAM 相關的資源清單")
+def list_iam() -> list:
+    resources = load_aws_config()
+    # 篩選 resourceType 包含 "IAM" 的資源 (不區分大小寫)
+    return [r for r in resources if "iam" in r.get("resourceType", "").lower()]
+
+
+@mcp.tool(name="list-network", description="回傳所有與網路相關的資源清單，例如 VPC, Subnet, Network Interface (NIC), Security Group (SG), Internet Gateway, Route Table 等")
+def list_network() -> list:
+    resources = load_aws_config()
+    # 網路資源的簡寫前綴
+    network_prefixes = {"vpc", "subnet", "eni", "sg", "acl", "rtb", "igw", "eipalloc"}
+    
+    def is_network(r):
+        res_type = r.get("resourceType", "")
+        if res_type:
+            res_type_lower = res_type.lower()
+            if "rds" in res_type_lower:
+                return False
+                
+        res_id = r.get("resourceId", "")
+        # 切割 resourceId 並檢查前綴簡寫
+        parts = res_id.split("-")
+        prefix = parts[0] if parts else ""
+        if prefix in network_prefixes:
+            return True
+        # 檢查任何一段是否包含簡寫（例如 default-vpc-xxx 情況）
+        if any(p in network_prefixes for p in parts):
+            return True
+            
+        if res_type:
+            res_type_lower = res_type.lower()
+            # 支援部分無簡寫 ID 的網路資源，如 LoadBalancer
+            if "loadbalancer" in res_type_lower:
+                return True
+        return False
+
+    return [r for r in resources if is_network(r)]
+
+
+@mcp.tool(name="list-storage", description="回傳所有與儲存相關的資源清單，例如 EBS Volume, S3 Bucket, EFS FileSystem 等")
+def list_storage() -> list:
+    resources = load_aws_config()
+    # EBS Volume 的簡寫為 vol，Snapshot 為 snap
+    storage_prefixes = {"vol", "snap"}
+    
+    def is_storage(r):
+        res_id = r.get("resourceId", "")
+        parts = res_id.split("-")
+        prefix = parts[0] if parts else ""
+        if prefix in storage_prefixes:
+            return True
+            
+        res_type = r.get("resourceType", "")
+        if res_type:
+            res_type_lower = res_type.lower()
+            # 匹配 s3 bucket 與 efs filesystem
+            if any(kw in res_type_lower for kw in ["s3::bucket", "efs::filesystem", "efs::accesspoint"]):
+                return True
+        return False
+
+    return [r for r in resources if is_storage(r)]
+
+
+@mcp.tool(name="list-compute", description="回傳所有與運算相關的資源清單，例如 EC2 Instance, Lambda Function, ECS Cluster/Service/TaskDefinition 等")
+def list_compute() -> list:
+    resources = load_aws_config()
+    
+    def is_compute(r):
+        res_id = r.get("resourceId", "")
+        parts = res_id.split("-")
+        prefix = parts[0] if parts else ""
+        # EC2 Instance 的簡寫前綴為 i
+        if prefix == "i":
+            return True
+            
+        res_type = r.get("resourceType", "")
+        if res_type:
+            res_type_lower = res_type.lower()
+            if any(kw in res_type_lower for kw in ["lambda", "ecs::", "eks::"]):
+                return True
+        return False
+
+    return [r for r in resources if is_compute(r)]
+
+
+@mcp.tool(name="list-all-types", description="列出目前資料檔案中存在的所有資源類型 (ResourceType)")
+def list_all_types() -> list:
+    resources = load_aws_config()
+    types = set(r.get("resourceType") for r in resources if r.get("resourceType"))
+    return sorted(list(types))
+
+
+@mcp.tool(name="query-by-type", description="依據指定的資源類型（例如 AWS::EC2::Subnet）過濾並回傳資源列表")
+def query_by_type(resource_type: str) -> list:
+    resources = load_aws_config()
+    return [r for r in resources if r.get("resourceType") == resource_type]
+
+
+class RequestLoggerMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        logger.info(f"\n[DEBUG REQUEST] {request.method} {request.url}")
+        logger.info(f"Headers: {dict(request.headers)}")
+        try:
+            body = await request.body()
+            if body:
+                logger.info(f"Body: {body.decode('utf-8', errors='ignore')}")
+        except Exception as e:
+            logger.error(f"Error reading body: {e}")
+        
+        response = await call_next(request)
+        logger.info(f"[DEBUG RESPONSE] Status: {response.status_code}\n")
+        return response
+
+
 if __name__ == "__main__":
     import os
     # Check if we should run in SSE mode (standard for ECS/Web deployments)
@@ -258,7 +414,9 @@ if __name__ == "__main__":
     
     if transport == "sse":
         logger.info(f"Starting FastMCP server via SSE (listening on {mcp.settings.host}:{mcp.settings.port})")
-        mcp.run(transport="sse")
+        app = mcp.streamable_http_app()
+        app.add_middleware(RequestLoggerMiddleware)
+        uvicorn.run(app, host=mcp.settings.host, port=mcp.settings.port)
     else:
         logger.info("Starting FastMCP server via stdio")
         mcp.run(transport="stdio")
